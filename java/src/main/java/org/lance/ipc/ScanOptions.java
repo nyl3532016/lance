@@ -33,6 +33,7 @@ public class ScanOptions {
   private final boolean withRowId;
   private final boolean withRowAddress;
   private final int batchReadahead;
+  private final boolean prefilter;
   private final Optional<List<ColumnOrdering>> columnOrderings;
 
   /**
@@ -51,6 +52,7 @@ public class ScanOptions {
    * @param withRowAddress Whether to include the row address in the results.
    * @param nearest (Optional) Nearest neighbor query.
    * @param batchReadahead Number of batches to read ahead.
+   * @param prefilter Whether to use prefiltering.
    */
   public ScanOptions(
       Optional<List<Integer>> fragmentIds,
@@ -64,6 +66,7 @@ public class ScanOptions {
       boolean withRowId,
       boolean withRowAddress,
       int batchReadahead,
+      boolean prefilter,
       Optional<List<ColumnOrdering>> columnOrderings) {
     Preconditions.checkArgument(
         !(filter.isPresent() && substraitFilter.isPresent()),
@@ -79,6 +82,7 @@ public class ScanOptions {
     this.withRowId = withRowId;
     this.withRowAddress = withRowAddress;
     this.batchReadahead = batchReadahead;
+    this.prefilter = prefilter;
     this.columnOrderings = columnOrderings;
   }
 
@@ -181,6 +185,15 @@ public class ScanOptions {
     return batchReadahead;
   }
 
+  /**
+   * Get whether to use prefiltering.
+   *
+   * @return true if prefiltering should be used, false otherwise.
+   */
+  public boolean isPrefilter() {
+    return prefilter;
+  }
+
   public Optional<List<ColumnOrdering>> getColumnOrderings() {
     return columnOrderings;
   }
@@ -201,6 +214,7 @@ public class ScanOptions {
         .add("withRowId", withRowId)
         .add("WithRowAddress", withRowAddress)
         .add("batchReadahead", batchReadahead)
+        .add("prefilter", prefilter)
         .add("columnOrdering", columnOrderings)
         .toString();
   }
@@ -218,6 +232,7 @@ public class ScanOptions {
     private boolean withRowId = false;
     private boolean withRowAddress = false;
     private int batchReadahead = 16;
+    private boolean prefilter = false;
     private Optional<List<ColumnOrdering>> columnOrderings = Optional.empty();
 
     public Builder() {}
@@ -239,6 +254,7 @@ public class ScanOptions {
       this.withRowId = options.isWithRowId();
       this.withRowAddress = options.isWithRowAddress();
       this.batchReadahead = options.getBatchReadahead();
+      this.prefilter = options.isPrefilter();
       this.columnOrderings = options.getColumnOrderings();
     }
 
@@ -363,6 +379,17 @@ public class ScanOptions {
       return this;
     }
 
+    /**
+     * Set whether to use prefiltering.
+     *
+     * @param prefilter true to use prefiltering, false otherwise.
+     * @return Builder instance for method chaining.
+     */
+    public Builder prefilter(boolean prefilter) {
+      this.prefilter = prefilter;
+      return this;
+    }
+
     public Builder setColumnOrderings(List<ColumnOrdering> columnOrderings) {
       this.columnOrderings = Optional.of(columnOrderings);
       return this;
@@ -386,6 +413,7 @@ public class ScanOptions {
           withRowId,
           withRowAddress,
           batchReadahead,
+          prefilter,
           columnOrderings);
     }
   }

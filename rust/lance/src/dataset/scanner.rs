@@ -2935,7 +2935,7 @@ impl Scanner {
                     filter_plan,
                     vector_scan_projection,
                     /*include_deleted_rows=*/ true,
-                    None,
+                    self.fragments.clone().map(Arc::new),
                     None,
                     /*is_prefilter= */ true,
                 )
@@ -2957,7 +2957,12 @@ impl Scanner {
         filter_plan: &FilterPlan,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // Check if we've created new versions since the index was built.
-        let unindexed_fragments = self.dataset.unindexed_fragments(&index.name).await?;
+        let mut unindexed_fragments = self.dataset.unindexed_fragments(&index.name).await?;
+        if let Some(fragments) = &self.fragments {
+            let frag_ids: std::collections::HashSet<_> = fragments.iter().map(|f| f.id).collect();
+            unindexed_fragments.retain(|f| frag_ids.contains(&f.id));
+        }
+
         if !unindexed_fragments.is_empty() {
             // need to set the metric type to be the same as the index
             // to make sure the distance is comparable.

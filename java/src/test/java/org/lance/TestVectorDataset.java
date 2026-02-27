@@ -98,11 +98,12 @@ public class TestVectorDataset implements AutoCloseable {
         int value = batchIndex * 80 + i;
         iVector.setSafe(i, value);
         sVector.setSafe(i, new Text("s-" + value));
-
+        vecVector.setNotNull(i);
         for (int j = 0; j < 32; j++) {
           vecItemsVector.setSafe(i * 32 + j, (float) (i * 32 + j));
         }
       }
+      vecItemsVector.setValueCount(80 * 32);
       root.setRowCount(80);
 
       WriteParams fragmentWriteParams = new WriteParams.Builder().build();

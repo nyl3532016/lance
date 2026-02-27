@@ -71,6 +71,7 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
     with_row_address: jboolean,    // boolean
     batch_readahead: jint,         // int
     column_orderings: JObject,     // Optional<List<ColumnOrdering>>
+    prefilter: jboolean,           // boolean
 ) -> JObject<'local> {
     ok_or_throw!(
         env,
@@ -88,7 +89,8 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
             with_row_id,
             with_row_address,
             batch_readahead,
-            column_orderings
+            column_orderings,
+            prefilter
         )
     )
 }
@@ -109,6 +111,7 @@ fn inner_create_scanner<'local>(
     with_row_address: jboolean,
     batch_readahead: jint,
     column_orderings: JObject,
+    prefilter: jboolean,
 ) -> Result<JObject<'local>> {
     let fragment_ids_opt = env.get_ints_opt(&fragment_ids_obj)?;
     let dataset_guard =
@@ -172,12 +175,16 @@ fn inner_create_scanner<'local>(
             .call_method(&query_obj, "get", "()Ljava/lang/Object;", &[])?
             .l()?;
 
+        if prefilter == JNI_TRUE {
+            scanner.prefilter(true);
+        }
+
         // Set column and key for nearest search
         let column = env.get_string_from_method(&java_obj, "getColumn")?;
         let key_array = env.get_vec_f32_from_method(&java_obj, "getKey")?;
         let key = Float32Array::from(key_array);
         let k = env.get_int_as_usize_from_method(&java_obj, "getK")?;
-        let _ = scanner.nearest(&column, &key, k);
+        scanner.nearest(&column, &key, k)?;
 
         let minimum_nprobes = env.get_int_as_usize_from_method(&java_obj, "getMinimumNprobes")?;
         scanner.minimum_nprobes(minimum_nprobes);
