@@ -258,7 +258,7 @@ public class VectorSearchTest {
                     new Query.Builder()
                         .setColumn(TestVectorDataset.vectorColumnName)
                         .setKey(key)
-                        .setK(5)
+                        .setK(6)
                         .setUseIndex(createVectorIndex)
                         .build())
                 .build();
@@ -268,7 +268,7 @@ public class VectorSearchTest {
             System.out.println("Schema:");
             assertTrue(reader.loadNextBatch(), "Expected at least one batch");
 
-            assertEquals(5, root.getRowCount(), "Expected 5 results");
+            assertEquals(6, root.getRowCount(), "Expected 6 results");
 
             assertEquals(4, root.getSchema().getFields().size(), "Expected 4 columns");
             assertEquals("i", root.getSchema().getFields().get(0).getName());
@@ -278,7 +278,7 @@ public class VectorSearchTest {
             assertEquals("_distance", root.getSchema().getFields().get(3).getName());
 
             IntVector iVector = (IntVector) root.getVector("i");
-            Set<Integer> expectedI = new HashSet<>(Arrays.asList(240, 320, 241, 321, 242));
+            Set<Integer> expectedI = new HashSet<>(Arrays.asList(240, 320, 241, 321, 242, 322));
             Set<Integer> actualI = new HashSet<>();
             for (int i = 0; i < iVector.getValueCount(); i++) {
               actualI.add(iVector.get(i));
@@ -303,7 +303,7 @@ public class VectorSearchTest {
   @Test
   void test_knn_with_new_data_with_fragment() throws Exception {
     try (TestVectorDataset testVectorDataset =
-        new TestVectorDataset(tempDir.resolve("test_knn_with_fragment"))) {
+        new TestVectorDataset(tempDir.resolve("test_knn_with_new_data_with_fragment"))) {
       try (Dataset dataset = testVectorDataset.create()) {
         testVectorDataset.createIndex(dataset);
       }
@@ -320,7 +320,7 @@ public class VectorSearchTest {
                   new Query.Builder()
                       .setColumn(TestVectorDataset.vectorColumnName)
                       .setKey(key)
-                      .setK(5)
+                      .setK(6)
                       .setUseIndex(true)
                       .build())
               .build();
@@ -331,7 +331,7 @@ public class VectorSearchTest {
             System.out.println("Schema:");
             assertTrue(reader.loadNextBatch(), "Expected at least one batch");
 
-            assertEquals(5, root.getRowCount(), "Expected 5 results");
+            assertEquals(6, root.getRowCount(), "Expected 6 results");
 
             assertEquals(4, root.getSchema().getFields().size(), "Expected 4 columns");
             assertEquals("i", root.getSchema().getFields().get(0).getName());
@@ -341,7 +341,7 @@ public class VectorSearchTest {
             assertEquals("_distance", root.getSchema().getFields().get(3).getName());
 
             IntVector iVector = (IntVector) root.getVector("i");
-            Set<Integer> expectedI = new HashSet<>(Arrays.asList(240, 320, 241, 321, 242));
+            Set<Integer> expectedI = new HashSet<>(Arrays.asList(240, 320, 241, 321, 242, 322));
             Set<Integer> actualI = new HashSet<>();
             for (int i = 0; i < iVector.getValueCount(); i++) {
               actualI.add(iVector.get(i));
