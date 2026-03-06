@@ -201,19 +201,22 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
     mut env: JNIEnv<'local>,
     _reader: JObject,
     jdataset: JObject,
-    fragment_ids_obj: JObject,     // Optional<List<Integer>>
-    columns_obj: JObject,          // Optional<List<String>>
-    substrait_filter_obj: JObject, // Optional<ByteBuffer>
-    filter_obj: JObject,           // Optional<String>
-    batch_size_obj: JObject,       // Optional<Long>
-    limit_obj: JObject,            // Optional<Integer>
-    offset_obj: JObject,           // Optional<Integer>
-    query_obj: JObject,            // Optional<Query>
-    fts_query_obj: JObject,        // Optional<FullTextQuery>
-    with_row_id: jboolean,         // boolean
-    with_row_address: jboolean,    // boolean
-    batch_readahead: jint,         // int
-    column_orderings: JObject,     // Optional<List<ColumnOrdering>>
+    fragment_ids_obj: JObject,        // Optional<List<Integer>>
+    columns_obj: JObject,             // Optional<List<String>>
+    substrait_filter_obj: JObject,    // Optional<ByteBuffer>
+    filter_obj: JObject,              // Optional<String>
+    batch_size_obj: JObject,          // Optional<Long>
+    limit_obj: JObject,               // Optional<Integer>
+    offset_obj: JObject,              // Optional<Integer>
+    query_obj: JObject,               // Optional<Query>
+    fts_query_obj: JObject,           // Optional<FullTextQuery>
+    prefilter: jboolean,              // boolean
+    with_row_id: jboolean,            // boolean
+    with_row_address: jboolean,       // boolean
+    batch_readahead: jint,            // int
+    column_orderings: JObject,        // Optional<List<ColumnOrdering>>
+    use_scalar_index: jboolean,       // boolean
+    substrait_aggregate_obj: JObject, // Optional<ByteBuffer>
 ) -> JObject<'local> {
     ok_or_throw!(
         env,
@@ -229,6 +232,7 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
             offset_obj,
             query_obj,
             fts_query_obj,
+            prefilter,
             with_row_id,
             with_row_address,
             batch_readahead,
@@ -250,6 +254,7 @@ fn inner_create_scanner<'local>(
     offset_obj: JObject,
     query_obj: JObject,
     fts_query_obj: JObject,
+    prefilter: jboolean,
     with_row_id: jboolean,
     with_row_address: jboolean,
     batch_readahead: jint,
@@ -309,6 +314,12 @@ fn inner_create_scanner<'local>(
     if with_row_address == JNI_TRUE {
         scanner.with_row_address();
     }
+
+    if prefilter == JNI_TRUE {
+        scanner.prefilter(true);
+    }
+
+    scanner.use_scalar_index(use_scalar_index == JNI_TRUE);
 
     env.get_optional(&query_obj, |env, java_obj| {
         // Set column and key for nearest search
