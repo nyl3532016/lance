@@ -236,7 +236,9 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
             with_row_id,
             with_row_address,
             batch_readahead,
-            column_orderings
+            column_orderings,
+            use_scalar_index,
+            substrait_aggregate_obj,
         )
     )
 }
@@ -259,6 +261,8 @@ fn inner_create_scanner<'local>(
     with_row_address: jboolean,
     batch_readahead: jint,
     column_orderings: JObject,
+    use_scalar_index: jboolean,
+    _substrait_aggregate_obj: JObject,
 ) -> Result<JObject<'local>> {
     let fragment_ids_opt = env.get_ints_opt(&fragment_ids_obj)?;
     let dataset_guard =

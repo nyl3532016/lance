@@ -102,7 +102,9 @@ public class TestVectorDataset implements AutoCloseable {
         for (int j = 0; j < 32; j++) {
           vecItemsVector.setSafe(i * 32 + j, (float) (i * 32 + j));
         }
+        vecVector.setNotNull(i);
       }
+
       root.setRowCount(80);
 
       WriteParams fragmentWriteParams = new WriteParams.Builder().build();
@@ -127,6 +129,7 @@ public class TestVectorDataset implements AutoCloseable {
         for (int j = 0; j < 32; j++) {
           vecItemsVector.setSafe(i * 32 + j, (float) i);
         }
+        vecVector.setNotNull(i);
       }
       root.setRowCount(10);
 
