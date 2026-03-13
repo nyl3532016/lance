@@ -1,8 +1,9 @@
 [tool.bumpversion]
-current_version = "2.0.1"
-parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(-(?P<prerelease>(beta|rc))\\.(?P<prerelease_num>\\d+))?"
+current_version = "2.0.1-cmit"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)(-(?P<prerelease>[a-zA-Z0-9]+)(\\.(?P<prerelease_num>\\d+))?)?"
 serialize = [
     "{major}.{minor}.{patch}-{prerelease}.{prerelease_num}",
+    "{major}.{minor}.{patch}-{prerelease}",
     "{major}.{minor}.{patch}"
 ]
 search = "{current_version}"
