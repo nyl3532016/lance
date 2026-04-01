@@ -5697,7 +5697,7 @@ dependencies = [
 
 [[package]]
 name = "pylance"
-version = "2.0.1-cmit"
+version = "2.0.1+cmit"
 dependencies = [
  "arrow",
  "arrow-array",
