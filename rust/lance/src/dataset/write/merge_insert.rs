@@ -1658,7 +1658,16 @@ impl MergeInsertJob {
         //       indexed vs non-indexed cases. That should be handled by optimizer rules.
         let session_config = SessionConfig::default();
         let session_ctx = SessionContext::new_with_config(session_config);
-        let scan = session_ctx.read_lance_unordered(self.dataset.clone(), true, true)?;
+        let provider = Arc::new(
+            crate::datafusion::dataframe::LanceTableProvider::new_with_ordering(
+                self.dataset.clone(),
+                true,
+                true,
+                false,
+            )
+            .with_blob_handling(lance_core::datatypes::BlobHandling::AllBinary),
+        );
+        let scan = session_ctx.read_table(provider)?;
         // Wrap column names in double quotes to preserve case (DataFusion lowercases unquoted identifiers)
         let on_cols = self
             .params
@@ -11445,6 +11454,127 @@ MergeInsert: on=[id], when_matched=DoNothing, when_not_matched=InsertAll, when_n
                     id,
                     meta
                 );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn test_merge_insert_with_blob() {
+        use arrow_array::LargeBinaryArray;
+        use arrow_schema::Field;
+        use arrow_schema::Schema as ArrowSchema;
+        use lance_arrow::BLOB_META_KEY;
+
+        let test_dir = TempStrDir::default();
+        let blob_meta = HashMap::from([(BLOB_META_KEY.to_string(), "true".to_string())]);
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("blobs", DataType::LargeBinary, true).with_metadata(blob_meta.clone()),
+            Field::new("id", DataType::Int64, true),
+            Field::new("other", DataType::Int64, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(LargeBinaryArray::from(vec![
+                    Some(b"foo".as_slice()),
+                    Some(b"bar".as_slice()),
+                ])),
+                Arc::new(Int64Array::from(vec![0, 1])),
+                Arc::new(Int64Array::from(vec![10, 20])),
+            ],
+        )
+        .unwrap();
+
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
+        let dataset = Dataset::write(
+            reader,
+            &test_dir,
+            Some(WriteParams {
+                data_storage_version: Some(LanceFileVersion::V2_1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Now update without providing 'blobs'
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("other", DataType::Int64, true),
+        ]));
+        let new_data = RecordBatch::try_new(
+            source_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(Int64Array::from(vec![200, 300])),
+            ],
+        )
+        .unwrap();
+        let new_reader = Box::new(RecordBatchIterator::new(
+            vec![Ok(new_data)],
+            source_schema.clone(),
+        ));
+
+        let job = MergeInsertBuilder::try_new(Arc::new(dataset), vec!["id".to_string()])
+            .unwrap()
+            .when_matched(WhenMatched::UpdateAll)
+            .when_not_matched(WhenNotMatched::InsertAll)
+            .try_build()
+            .unwrap();
+
+        // This will crash due to LargeBinary vs Struct schema mismatch!
+        let result = job.execute_reader(new_reader).await;
+        // With AllBinary set, the partial update should succeed!
+        let (new_dataset, _stats) = result.unwrap();
+        assert_eq!(new_dataset.count_rows(None).await.unwrap(), 3);
+
+        let batches = new_dataset
+            .scan()
+            .try_into_stream()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let batch = arrow_select::concat::concat_batches(&batches[0].schema(), &batches).unwrap();
+
+        let id_col = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let other_col = batch
+            .column_by_name("other")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let blobs_col = batch
+            .column_by_name("blobs")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::StructArray>()
+            .unwrap();
+
+        for i in 0..batch.num_rows() {
+            let id = id_col.value(i);
+            let other = other_col.value(i);
+            let blob_is_null = blobs_col.is_null(i);
+            match id {
+                0 => {
+                    assert_eq!(other, 10);
+                    assert!(!blob_is_null, "id=0 should have kept its blob");
+                }
+                1 => {
+                    assert_eq!(other, 200);
+                    assert!(!blob_is_null, "id=1 should have kept its blob on update");
+                }
+                2 => {
+                    assert_eq!(other, 300);
+                    assert!(blob_is_null, "id=2 should have a null blob on insert");
+                }
+                _ => panic!("Unexpected id: {}", id),
             }
         }
     }
