@@ -77,6 +77,10 @@ impl LanceTableProvider {
         }
     }
 
+    /// Overrides how blob columns are read during [`TableProvider::scan`].
+    ///
+    /// When unset, the underlying dataset scan uses its default
+    /// [`BlobHandling`](lance_core::datatypes::BlobHandling) policy.
     pub fn with_blob_handling(mut self, handling: lance_core::datatypes::BlobHandling) -> Self {
         self.blob_handling = Some(handling);
         self
