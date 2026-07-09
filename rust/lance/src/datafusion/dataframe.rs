@@ -182,6 +182,15 @@ pub trait SessionContextExt {
         with_row_addr: bool,
     ) -> datafusion::common::Result<DataFrame>;
 
+    /// Creates a DataFrame for reading a Lance dataset without ordering
+    #[deprecated(note = "use read_lance instead (which is now unordered by default)")]
+    fn read_lance_unordered(
+        &self,
+        dataset: Arc<Dataset>,
+        with_row_id: bool,
+        with_row_addr: bool,
+    ) -> datafusion::common::Result<DataFrame>;
+
     /// Creates a DataFrame for reading a stream of data
     ///
     /// This dataframe may only be queried once, future queries will fail
@@ -238,6 +247,20 @@ impl SessionContextExt for SessionContext {
             dataset,
             with_row_id,
             with_row_addr,
+        )))
+    }
+
+    fn read_lance_unordered(
+        &self,
+        dataset: Arc<Dataset>,
+        with_row_id: bool,
+        with_row_addr: bool,
+    ) -> datafusion::common::Result<DataFrame> {
+        self.read_table(Arc::new(LanceTableProvider::new_with_ordering(
+            dataset,
+            with_row_id,
+            with_row_addr,
+            false,
         )))
     }
 
