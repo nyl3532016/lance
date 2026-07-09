@@ -11522,10 +11522,10 @@ MergeInsert: on=[id], when_matched=DoNothing, when_not_matched=InsertAll, when_n
             .try_build()
             .unwrap();
 
-        // This will crash due to LargeBinary vs Struct schema mismatch!
-        let result = job.execute_reader(new_reader).await;
-        // With AllBinary set, the partial update should succeed!
-        let (new_dataset, _stats) = result.unwrap();
+        // With AllBinary blob handling, the partial-schema update (source omits
+        // the `blobs` column) succeeds instead of failing with a LargeBinary vs
+        // Struct schema mismatch.
+        let (new_dataset, _stats) = job.execute_reader(new_reader).await.unwrap();
         assert_eq!(new_dataset.count_rows(None).await.unwrap(), 3);
 
         let batches = new_dataset
