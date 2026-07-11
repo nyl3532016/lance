@@ -14,8 +14,8 @@ use crate::dataset::transaction::{Operation, Transaction};
 use crate::dataset::utils::make_rowid_capture_stream;
 use crate::{Dataset, io::exec::Planner};
 use crate::{Error, Result};
-use arrow_array::RecordBatch;
-use arrow_schema::{ArrowError, DataType, Schema as ArrowSchema};
+use arrow_array::{Array, RecordBatch, StructArray};
+use arrow_schema::{ArrowError, DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::common::DFSchema;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::ExprSchemable;
@@ -153,7 +153,11 @@ impl UpdateBuilder {
             .context(InvalidInputSnafu {})?;
 
         // Cast expression to the column's data type if necessary.
-        let dest_type = field.data_type();
+        let dest_type = if field.is_blob_v2() {
+            DataType::LargeBinary
+        } else {
+            field.data_type()
+        };
         let df_schema = DFSchema::try_from(schema.as_ref().clone())?;
         let src_type = expr
             .get_type(&df_schema)
@@ -281,7 +285,19 @@ impl UpdateJob {
     async fn execute_impl(self) -> Result<UpdateData> {
         let mut scanner = self.dataset.scan();
         scanner.with_row_id();
-        scanner.blob_handling(BlobHandling::AllBinary);
+        let legacy_blob_ids = self
+            .dataset
+            .schema()
+            .fields_pre_order()
+            .filter(|f| f.is_blob() && !f.is_blob_v2())
+            .map(|f| f.id as u32)
+            .collect::<std::collections::HashSet<_>>();
+        let blob_handling = if legacy_blob_ids.is_empty() {
+            BlobHandling::BlobsDescriptions
+        } else {
+            BlobHandling::SomeBlobsBinary(legacy_blob_ids)
+        };
+        scanner.blob_handling(blob_handling);
 
         if let Some(expr) = &self.condition {
             scanner.filter_expr(expr.clone());
@@ -298,19 +314,45 @@ impl UpdateJob {
 
         let schema = stream.schema();
 
-        let expected_schema = self.dataset.schema().into();
-        if schema.as_ref() != &expected_schema {
-            return Err(Error::internal(format!(
-                "Expected schema {:?} but got {:?}",
-                expected_schema, schema
-            )));
+        let expected_schema_check: Arc<ArrowSchema> = Arc::new(self.dataset.schema().into());
+        for field in expected_schema_check.fields() {
+            if let Some(lance_field) = self.dataset.schema().field(field.name()) {
+                if !lance_field.is_blob_v2() {
+                    if let Some(stream_field) = schema.field_with_name(field.name()).ok() {
+                        if stream_field.data_type() != field.data_type() {
+                            return Err(Error::internal(format!(
+                                "Expected field {:?} but got {:?}",
+                                field, stream_field
+                            )));
+                        }
+                    }
+                }
+            }
         }
 
+        // Identify blob v2 column names so we can convert them back to their
+        // writable Struct<data, uri> form after applying updates.
+        let blob_v2_columns: Vec<String> = self
+            .dataset
+            .schema()
+            .fields
+            .iter()
+            .filter(|f| f.is_blob_v2())
+            .map(|f| f.name.clone())
+            .collect();
+
         let updates_ref = self.updates.clone();
+        let blob_v2_cols = Arc::new(blob_v2_columns);
+        let dataset_schema = Arc::new(self.dataset.schema().clone());
         let stream = stream
             .map(move |batch| {
                 let updates = updates_ref.clone();
-                tokio::task::spawn_blocking(move || Self::apply_updates(batch?, updates))
+                let blob_cols = blob_v2_cols.clone();
+                let ds_schema = dataset_schema.clone();
+                tokio::task::spawn_blocking(move || {
+                    let batch = Self::apply_updates(batch?, updates)?;
+                    Self::convert_blob_v2_columns(batch, &blob_cols, &ds_schema)
+                })
             })
             .buffered(get_num_compute_intensive_cpus())
             .map(|res| match res {
@@ -318,7 +360,29 @@ impl UpdateJob {
                 Ok(Err(err)) => Err(err),
                 Err(e) => Err(DataFusionError::ExecutionJoin(Box::new(e))),
             });
-        let stream = RecordBatchStreamAdapter::new(schema, stream);
+        let mut write_fields = Vec::with_capacity(schema.fields().len());
+        for field in schema.fields() {
+            if let Some(lance_field) = self.dataset.schema().field(field.name()) {
+                if lance_field.is_blob_v2() {
+                    let is_updated = self.updates.contains_key(field.name());
+                    if is_updated {
+                        let original_field: ArrowField = lance_field.into();
+                        write_fields.push(Arc::new(original_field));
+                    } else {
+                        write_fields.push(field.clone());
+                    }
+                } else {
+                    write_fields.push(field.clone());
+                }
+            } else {
+                write_fields.push(field.clone());
+            }
+        }
+        let write_schema: Arc<ArrowSchema> = Arc::new(ArrowSchema::new_with_metadata(
+            write_fields,
+            schema.metadata().clone(),
+        ));
+        let stream = RecordBatchStreamAdapter::new(write_schema, stream);
 
         let version = self
             .dataset
@@ -445,9 +509,115 @@ impl UpdateJob {
     ) -> DFResult<RecordBatch> {
         for (column, expr) in updates.iter() {
             let new_values = expr.evaluate(&batch)?.into_array(batch.num_rows())?;
-            batch = batch.replace_column_by_name(column.as_str(), new_values)?;
+            batch = batch.replace_column_schema_by_name(
+                column.as_str(),
+                new_values.data_type().clone(),
+                new_values,
+            )?;
         }
         Ok(batch)
+    }
+
+    /// Convert LargeBinary columns back to blob v2 `Struct<data, uri>` format
+    /// for writing. The scanner with AllBinary produces LargeBinary for blob v2
+    /// columns, but write_fragments_internal expects the original struct layout
+    /// for blob preprocessing.
+    fn convert_blob_v2_columns(
+        batch: RecordBatch,
+        blob_v2_columns: &[String],
+        dataset_schema: &lance_core::datatypes::Schema,
+    ) -> DFResult<RecordBatch> {
+        use arrow_array::{
+            LargeBinaryArray,
+            builder::{LargeBinaryBuilder, StringBuilder},
+        };
+        use arrow_buffer::NullBufferBuilder;
+
+        if blob_v2_columns.is_empty() {
+            return Ok(batch);
+        }
+
+        let schema = batch.schema();
+        let mut new_columns: Vec<Arc<dyn Array>> = Vec::with_capacity(batch.num_columns());
+        let mut new_fields: Vec<Arc<ArrowField>> = Vec::with_capacity(batch.num_columns());
+
+        for (col_idx, field) in schema.fields().iter().enumerate() {
+            if blob_v2_columns.contains(field.name()) {
+                let current_col = batch.column(col_idx);
+                if current_col.data_type() == &DataType::LargeBinary {
+                    let binary_array = current_col
+                        .as_any()
+                        .downcast_ref::<LargeBinaryArray>()
+                        .ok_or_else(|| {
+                            DataFusionError::Internal(format!(
+                                "Expected LargeBinary for blob v2 column '{}', got {:?}",
+                                field.name(),
+                                current_col.data_type()
+                            ))
+                        })?;
+
+                    // Build Struct<data: LargeBinary?, uri: Utf8?> from the binary data
+                    let num_rows = binary_array.len();
+                    let mut data_builder = LargeBinaryBuilder::with_capacity(num_rows, 0);
+                    let mut uri_builder = StringBuilder::with_capacity(num_rows, 0);
+                    let mut validity = NullBufferBuilder::new(num_rows);
+
+                    for i in 0..num_rows {
+                        if binary_array.is_null(i) {
+                            data_builder.append_null();
+                            uri_builder.append_null();
+                            validity.append_null();
+                        } else {
+                            data_builder.append_value(binary_array.value(i));
+                            uri_builder.append_null();
+                            validity.append_non_null();
+                        }
+                    }
+
+                    let struct_fields = vec![
+                        ArrowField::new("data", DataType::LargeBinary, true),
+                        ArrowField::new("uri", DataType::Utf8, true),
+                    ];
+                    let struct_array = StructArray::try_new(
+                        struct_fields.into(),
+                        vec![
+                            Arc::new(data_builder.finish()) as Arc<dyn Array>,
+                            Arc::new(uri_builder.finish()) as Arc<dyn Array>,
+                        ],
+                        validity.finish(),
+                    )
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+                    new_columns.push(Arc::new(struct_array));
+
+                    // Use the original blob v2 field from the dataset schema
+                    // to preserve extension metadata.
+                    let lance_field = dataset_schema
+                        .field(field.name())
+                        .expect("blob v2 column should exist in dataset schema");
+                    let original_field: ArrowField = lance_field.into();
+                    new_fields.push(Arc::new(original_field));
+                } else {
+                    // It was untouched and is already a Struct (or matching type)
+                    new_columns.push(current_col.clone());
+                    new_fields.push(field.clone());
+                }
+            } else {
+                new_columns.push(batch.column(col_idx).clone());
+                new_fields.push(field.clone());
+            }
+        }
+
+        let new_schema = Arc::new(ArrowSchema::new_with_metadata(
+            new_fields
+                .iter()
+                .map(|f| f.as_ref().clone())
+                .collect::<Vec<_>>(),
+            schema.metadata().clone(),
+        ));
+
+        RecordBatch::try_new(new_schema, new_columns)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
     /// Use previous found rows ids to delete rows from existing fragments.
@@ -1773,5 +1943,98 @@ mod tests {
 
         let idx_foo = ids.values().iter().position(|&x| x == 0).unwrap();
         assert_eq!(blobs.value(idx_foo), b"foo");
+    }
+
+    #[tokio::test]
+    async fn test_update_with_blob_v2() {
+        use lance_arrow::{ARROW_EXT_NAME_KEY, BLOB_V2_EXT_NAME};
+
+        let test_dir = TempStrDir::default();
+
+        // Build blob v2 schema: Struct<data: LargeBinary?, uri: Utf8?> with
+        // ARROW:extension:name = "lance.blob.v2"
+        let blob_v2_field = crate::blob::blob_field("blobs", true);
+        let schema = Arc::new(ArrowSchema::new(vec![
+            blob_v2_field,
+            Field::new("id", DataType::Int64, false),
+        ]));
+
+        // Build blob v2 data using BlobArrayBuilder
+        let mut blob_builder = crate::blob::BlobArrayBuilder::new(3);
+        blob_builder.push_bytes(b"foo").unwrap();
+        blob_builder.push_bytes(b"bar").unwrap();
+        blob_builder.push_bytes(b"baz").unwrap();
+        let blob_array = blob_builder.finish().unwrap();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![blob_array, Arc::new(Int64Array::from(vec![0, 1, 2]))],
+        )
+        .unwrap();
+
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
+        let dataset = Dataset::write(
+            reader,
+            &test_dir,
+            Some(WriteParams {
+                data_storage_version: Some(LanceFileVersion::V2_2),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Verify the blob v2 field is properly recognized
+        assert!(
+            dataset
+                .schema()
+                .field("blobs")
+                .unwrap()
+                .metadata
+                .get(ARROW_EXT_NAME_KEY)
+                .map(|v| v == BLOB_V2_EXT_NAME)
+                .unwrap_or(false),
+            "blobs field should be marked as blob v2"
+        );
+
+        // Perform an update: update the "blobs" column where id = 1
+        let dataset = Arc::new(dataset);
+        let updated_dataset = UpdateBuilder::new(dataset)
+            .update_where("id = 1")
+            .unwrap()
+            .set("blobs", "arrow_cast('updated_bar', 'LargeBinary')")
+            .unwrap()
+            .build()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap()
+            .new_dataset;
+
+        let id_batch = updated_dataset
+            .scan()
+            .project(&["id"])
+            .unwrap()
+            .try_into_batch()
+            .await
+            .unwrap();
+        let ids = id_batch
+            .column_by_name("id")
+            .unwrap()
+            .as_primitive::<Int64Type>();
+
+        let idx_foo = ids.values().iter().position(|&x| x == 0).unwrap() as u64;
+        let idx_updated = ids.values().iter().position(|&x| x == 1).unwrap() as u64;
+        let idx_baz = ids.values().iter().position(|&x| x == 2).unwrap() as u64;
+
+        let blobs = updated_dataset
+            .take_blobs_by_indices(&[idx_foo, idx_updated, idx_baz], "blobs")
+            .await
+            .unwrap();
+
+        assert_eq!(blobs.len(), 3);
+        assert_eq!(blobs[0].read().await.unwrap().as_ref(), b"foo");
+        assert_eq!(blobs[1].read().await.unwrap().as_ref(), b"updated_bar");
+        assert_eq!(blobs[2].read().await.unwrap().as_ref(), b"baz");
     }
 }

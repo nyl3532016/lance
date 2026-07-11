@@ -281,12 +281,14 @@ impl Field {
         // operators (notably `SortExec` in scalar-index training, where it
         // was responsible for >100 GiB external-sort spills on real-world
         // tables).
-        if self.logical_type.is_map() && !projection.contains_field_id(self.id) {
+        if (self.logical_type.is_map() || self.is_blob_v2())
+            && !projection.contains_field_id(self.id)
+        {
             return None;
         }
 
-        let children = if self.logical_type.is_map() {
-            // Map field is selected: keep all children intact.
+        let children = if self.logical_type.is_map() || self.is_blob_v2() {
+            // Map/BlobV2 field is selected: keep all children intact.
             self.children.clone()
         } else {
             self.children
