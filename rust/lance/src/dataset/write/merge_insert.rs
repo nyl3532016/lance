@@ -1821,7 +1821,25 @@ impl MergeInsertJob {
         // Goal: we shouldn't have to add new branches in this code to handle
         //       indexed vs non-indexed cases. That should be handled by optimizer rules.
         let session_ctx = SessionContext::new();
-        let scan = session_ctx.read_lance_unordered(self.dataset.clone(), true, true)?;
+        let binary_blob_field_ids = self
+            .dataset
+            .schema()
+            .fields_pre_order()
+            .filter(|field| field.is_blob() && !field.is_blob_v2())
+            .map(|field| field.id as u32)
+            .collect();
+        let target_provider = Arc::new(
+            crate::datafusion::dataframe::LanceTableProvider::new_with_ordering(
+                self.dataset.clone(),
+                true,
+                true,
+                false,
+            )
+            .with_blob_handling(lance_core::datatypes::BlobHandling::SomeBlobsBinary(
+                binary_blob_field_ids,
+            )),
+        );
+        let scan = session_ctx.read_table(target_provider)?;
         // Wrap column names in double quotes to preserve case (DataFusion lowercases unquoted identifiers)
         let on_cols = self
             .params
